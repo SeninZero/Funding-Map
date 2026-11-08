@@ -22,7 +22,7 @@
   table { width: 100%; border-collapse: collapse; background: #fff; }
   th, td { text-align: left; padding: 8px; border-bottom: 1px solid #eee; font-size: .9rem; }
   th { background: #fafafa; position: sticky; top: 0; }
-  tbody tr { cursor: pointer; }
+  tbody tr { cursor: pointer; transition: background-color 0.2s; }
   tbody tr:hover { background: #eef7f0; }
   tbody tr.nomap { cursor: default; color: #777; }
   .count { padding: 0 16px 8px; color: #555; font-size: .85rem; }
@@ -39,11 +39,7 @@
   <input id="search" type="search" placeholder="Search all fields…" aria-label="Search">
   <select id="sector" aria-label="Sector"></select>
   <select id="location" aria-label="Location"></select>
-  <select id="sort" aria-label="Sort by funding amount">
-    <option value="">Sort: none</option>
-    <option value="desc">Funding: high → low</option>
-    <option value="asc">Funding: low → high</option>
-  </select>
+  <select id="amountFilter" aria-label="Filter by funding amount"></select>
 </div>
 <div id="status" role="status">Loading funding opportunities…</div>
 <div class="count" id="count"></div>
@@ -62,7 +58,7 @@
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 <script>
 const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vS4HpEYkTwel9v4M7CCfHhYqXturaKpdjA7zuTNPZoTEeiLZzYx29x-9Z-Fys6oM0-8nkNDsnsK7kA9/pub?gid=628675615&single=true&output=csv";
- 
+
 const COLUMNS = {
   company: "Fund name",
   website: "Website",
@@ -87,14 +83,16 @@ function safeUrl(u) {
   } catch { return ""; }
 }
 
-const parseNum = v => {
+// Added an optional 'addJitter' parameter to slightly scatter perfectly stacked coordinates
+const parseNum = (v, addJitter = false) => {
   const s = String(v ?? "").trim();
   if (s === "") return NaN;
-  return Number(s);
-};
-const parseAmount = v => {
-  const n = parseFloat(String(v ?? "").replace(/[^0-9.\-]/g, ""));
-  return isNaN(n) ? null : n;
+  let num = Number(s);
+  if (addJitter && !isNaN(num)) {
+    // Offset by a random amount roughly equivalent to ~0.5 to 1.5 km
+    num += (Math.random() - 0.5) * 0.015;
+  }
+  return num;
 };
 
 const map = L.map("map").setView([-28.5, 24.5], 5);
@@ -113,7 +111,7 @@ function popupHtml(it) {
   const link = url
     ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(it.website)}</a>`
     : "";
-  return `<strong>${esc(it.company)}</strong><br>${esc(it.sector)}<br>${esc(it.amountText)}${link ? "<br>" + link : ""}`;
+  return `<strong>${esc(it.company)}</strong><br>${esc(it.sector)}<br>${esc(it.amountText) || "Unspecified"}${link ? "<br>" + link : ""}`;
 }
 
 function fillSelect(sel, label, key) {
@@ -124,22 +122,15 @@ function fillSelect(sel, label, key) {
 
 function render() {
   const q = $("search").value.trim().toLowerCase();
-  const sector = $("sector").value, loc = $("location").value, sort = $("sort").value;
+  const sector = $("sector").value, loc = $("location").value, amountFilt = $("amountFilter").value;
 
+  // Replaced numeric sorting logic with categorical text filtering
   let out = items.filter(i =>
     (!sector || i.sector === sector) &&
     (!loc || i.location === loc) &&
-    (!q || i.haystack.includes(q)));
-
-  if (sort) {
-    const dir = sort === "asc" ? 1 : -1;
-    out = out.slice().sort((a, b) => {
-      if (a.amount === null && b.amount === null) return 0;
-      if (a.amount === null) return 1;
-      if (b.amount === null) return -1;
-      return (a.amount - b.amount) * dir;
-    });
-  }
+    (!amountFilt || i.amountText === amountFilt) &&
+    (!q || i.haystack.includes(q))
+  );
 
   cluster.clearLayers();
   const markers = out.filter(i => i.marker).map(i => i.marker);
@@ -151,7 +142,12 @@ function render() {
   out.forEach(it => {
     const tr = document.createElement("tr");
     if (!it.marker) tr.className = "nomap";
-    tr.innerHTML = `<td>${esc(it.company)}</td><td>${esc(it.sector)}</td><td>${esc(it.location)}</td><td>${esc(it.amountText)}</td>`;
+    
+    // Handled missing amounts gracefully
+    const displayAmount = it.amountText ? esc(it.amountText) : `<span style="color:#999; font-style:italic;">Unspecified</span>`;
+    
+    tr.innerHTML = `<td>${esc(it.company)}</td><td>${esc(it.sector)}</td><td>${esc(it.location)}</td><td>${displayAmount}</td>`;
+    
     if (it.marker) {
       tr.title = "Show on map";
       tr.addEventListener("click", () => {
@@ -188,9 +184,9 @@ Papa.parse(CSV_URL, {
         sector: (r[COLUMNS.sector] || "").trim(),
         location: (r[COLUMNS.location] || "").trim(),
         amountText: (r[COLUMNS.amount] || "").trim(),
-        amount: parseAmount(r[COLUMNS.amount]),
-        lat: parseNum(r[COLUMNS.lat]),
-        lng: parseNum(r[COLUMNS.lng]),
+        // Passed 'true' to add coordinate jitter
+        lat: parseNum(r[COLUMNS.lat], true),
+        lng: parseNum(r[COLUMNS.lng], true),
         marker: null
       };
       it.haystack = Object.values(r).join(" ").toLowerCase();
@@ -199,15 +195,20 @@ Papa.parse(CSV_URL, {
       }
       return it;
     });
+    
     fillSelect($("sector"), "sectors", "sector");
     fillSelect($("location"), "locations", "location");
+    // Dynamically populated the new amount filter with "Small", "Medium", "Large"
+    fillSelect($("amountFilter"), "amounts", "amountText"); 
+    
     $("status").remove();
     render();
   },
   error: err => showError("Could not load funding data. Check the CSV URL and your connection. (" + (err && err.message || "network error") + ")")
 });
 
-["search", "sector", "location", "sort"].forEach(id =>
+// Updated event listeners to watch the new amountFilter dropdown
+["search", "sector", "location", "amountFilter"].forEach(id =>
   $(id).addEventListener(id === "search" ? "input" : "change", render));
 </script>
 </body>
