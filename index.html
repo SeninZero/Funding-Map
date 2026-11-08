@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Funding Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; color: #222; background: #f5f6f8; }
+  header { padding: 12px 16px; background: #14532d; color: #fff; }
+  header h1 { margin: 0; font-size: 1.2rem; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px; background: #fff; border-bottom: 1px solid #ddd; }
+  .controls input, .controls select { padding: 8px; font-size: 1rem; flex: 1 1 140px; min-width: 0; }
+  #status { padding: 12px 16px; }
+  #status.error { color: #b00020; background: #fdecea; font-weight: 600; }
+  main { display: flex; flex-direction: column; }
+  #map { height: 50vh; min-height: 300px; width: 100%; }
+  #list { padding: 12px; overflow: auto; }
+  table { width: 100%; border-collapse: collapse; background: #fff; }
+  th, td { text-align: left; padding: 8px; border-bottom: 1px solid #eee; font-size: .9rem; }
+  th { background: #fafafa; position: sticky; top: 0; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: #eef7f0; }
+  tbody tr.nomap { cursor: default; color: #777; }
+  .count { padding: 0 16px 8px; color: #555; font-size: .85rem; }
+  @media (min-width: 900px) {
+    main { flex-direction: row; height: calc(100vh - 170px); }
+    #map { height: 100%; flex: 1 1 55%; }
+    #list { flex: 1 1 45%; height: 100%; }
+  }
+</style>
+</head>
+<body>
+<header><h1>Funding Map</h1></header>
+<div class="controls">
+  <input id="search" type="search" placeholder="Search all fields…" aria-label="Search">
+  <select id="sector" aria-label="Sector"></select>
+  <select id="location" aria-label="Location"></select>
+  <select id="sort" aria-label="Sort by funding amount">
+    <option value="">Sort: none</option>
+    <option value="desc">Funding: high → low</option>
+    <option value="asc">Funding: low → high</option>
+  </select>
+</div>
+<div id="status" role="status">Loading funding opportunities…</div>
+<div class="count" id="count"></div>
+<main>
+  <div id="map"></div>
+  <div id="list">
+    <table>
+      <thead><tr><th>Company</th><th>Sector</th><th>Location</th><th>Funding</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script>
+const CSV_URL = "PASTE_PUBLISHED_GOOGLE_SHEET_CSV_URL_HERE";
+
+const COLUMNS = {
+  company: "Company",
+  website: "Website",
+  sector: "Sector",
+  location: "Location",
+  amount: "Funding Amount",
+  lat: "Latitude",
+  lng: "Longitude"
+};
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// Only allow http(s) links to avoid javascript: URLs.
+function safeUrl(u) {
+  let s = String(u ?? "").trim();
+  if (!s) return "";
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(s)) s = "https://" + s;
+  try {
+    const p = new URL(s);
+    return /^https?:$/.test(p.protocol) ? p.href : "";
+  } catch { return ""; }
+}
+
+const parseNum = v => {
+  const s = String(v ?? "").trim();
+  if (s === "") return NaN;
+  return Number(s);
+};
+const parseAmount = v => {
+  const n = parseFloat(String(v ?? "").replace(/[^0-9.\-]/g, ""));
+  return isNaN(n) ? null : n;
+};
+
+const map = L.map("map").setView([-28.5, 24.5], 5);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19,
+  attribution: "&copy; OpenStreetMap contributors"
+}).addTo(map);
+const cluster = L.markerClusterGroup();
+map.addLayer(cluster);
+
+const $ = id => document.getElementById(id);
+let items = [];
+
+function popupHtml(it) {
+  const url = safeUrl(it.website);
+  const link = url
+    ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(it.website)}</a>`
+    : "";
+  return `<strong>${esc(it.company)}</strong><br>${esc(it.sector)}<br>${esc(it.amountText)}${link ? "<br>" + link : ""}`;
+}
+
+function fillSelect(sel, label, key) {
+  const vals = [...new Set(items.map(i => i[key]).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  sel.innerHTML = `<option value="">All ${esc(label)}</option>` +
+    vals.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
+}
+
+function render() {
+  const q = $("search").value.trim().toLowerCase();
+  const sector = $("sector").value, loc = $("location").value, sort = $("sort").value;
+
+  let out = items.filter(i =>
+    (!sector || i.sector === sector) &&
+    (!loc || i.location === loc) &&
+    (!q || i.haystack.includes(q)));
+
+  if (sort) {
+    const dir = sort === "asc" ? 1 : -1;
+    out = out.slice().sort((a, b) => {
+      if (a.amount === null && b.amount === null) return 0;
+      if (a.amount === null) return 1;
+      if (b.amount === null) return -1;
+      return (a.amount - b.amount) * dir;
+    });
+  }
+
+  cluster.clearLayers();
+  const markers = out.filter(i => i.marker).map(i => i.marker);
+  cluster.addLayers(markers);
+  if (markers.length) map.fitBounds(cluster.getBounds().pad(0.1), { maxZoom: 12 });
+
+  const body = $("rows");
+  body.innerHTML = "";
+  out.forEach(it => {
+    const tr = document.createElement("tr");
+    if (!it.marker) tr.className = "nomap";
+    tr.innerHTML = `<td>${esc(it.company)}</td><td>${esc(it.sector)}</td><td>${esc(it.location)}</td><td>${esc(it.amountText)}</td>`;
+    if (it.marker) {
+      tr.title = "Show on map";
+      tr.addEventListener("click", () => {
+        cluster.zoomToShowLayer(it.marker, () => it.marker.openPopup());
+        if (window.innerWidth < 900) $("map").scrollIntoView({ behavior: "smooth" });
+      });
+    } else {
+      tr.title = "No valid coordinates";
+    }
+    body.appendChild(tr);
+  });
+  $("count").textContent = `${out.length} of ${items.length} opportunities (${markers.length} on map)`;
+}
+
+function showError(msg) {
+  const s = $("status");
+  s.className = "error";
+  s.textContent = msg;
+}
+
+Papa.parse(CSV_URL, {
+  download: true,
+  header: true,
+  skipEmptyLines: true,
+  complete: res => {
+    if (!res.data.length || !(COLUMNS.company in res.data[0])) {
+      showError("Could not load funding data: the CSV is empty or its columns don't match the expected headers.");
+      return;
+    }
+    items = res.data.map(r => {
+      const it = {
+        company: (r[COLUMNS.company] || "").trim(),
+        website: (r[COLUMNS.website] || "").trim(),
+        sector: (r[COLUMNS.sector] || "").trim(),
+        location: (r[COLUMNS.location] || "").trim(),
+        amountText: (r[COLUMNS.amount] || "").trim(),
+        amount: parseAmount(r[COLUMNS.amount]),
+        lat: parseNum(r[COLUMNS.lat]),
+        lng: parseNum(r[COLUMNS.lng]),
+        marker: null
+      };
+      it.haystack = Object.values(r).join(" ").toLowerCase();
+      if (isFinite(it.lat) && isFinite(it.lng) && Math.abs(it.lat) <= 90 && Math.abs(it.lng) <= 180) {
+        it.marker = L.marker([it.lat, it.lng]).bindPopup(popupHtml(it));
+      }
+      return it;
+    });
+    fillSelect($("sector"), "sectors", "sector");
+    fillSelect($("location"), "locations", "location");
+    $("status").remove();
+    render();
+  },
+  error: err => showError("Could not load funding data. Check the CSV URL and your connection. (" + (err && err.message || "network error") + ")")
+});
+
+["search", "sector", "location", "sort"].forEach(id =>
+  $(id).addEventListener(id === "search" ? "input" : "change", render));
+</script>
+</body>
+</html>
