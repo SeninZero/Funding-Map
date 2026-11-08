@@ -64,13 +64,13 @@
 const CSV_URL = "https://docs.google.com/spreadsheets/d/12b4D0tz1ZiElFPJFeiURnhQsHtbxBuHvv2SpsrXdj8k/edit?usp=sharing";
 
 const COLUMNS = {
-  company: "Company",
+  company: "Fund name",
   website: "Website",
-  sector: "Sector",
-  location: "Location",
-  amount: "Funding Amount",
-  lat: "Latitude",
-  lng: "Longitude"
+  sector: "Sector focus",
+  location: "City",
+  amount: "Funding amount",
+  lat: "City geo lat",
+  lng: "City geo long"
 };
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
